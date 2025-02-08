@@ -5,7 +5,6 @@ import kagglehub
 path = 'C:\Users\Danya\.cache\kagglehub\datasets\mathurinache\the-lj-speech-dataset\versions\1'
 
 print("Path to dataset files:", path)
-# Path to dataset files: C:\Users\Danya\.cache\kagglehub\datasets\mathurinache\the-lj-speech-dataset\versions\1
 import tensorflow as tf
 
 import os
