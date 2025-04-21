@@ -51,6 +51,7 @@ def estimate_snr(audio, frame_length=2048):
     magnitude = np.abs(D)
     power = magnitude ** 2
     
+    # Сделать SNR по кадрам. (посмотреть готовые решения)
     # Разделение на голосовые и неголосовые фреймы
     mean_power = np.mean(power, axis=0)
     threshold = 0.5 * np.max(mean_power)
