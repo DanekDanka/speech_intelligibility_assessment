@@ -45,24 +45,55 @@ VAD_PARAMS = {
     'hop_length': 512
 }
 
-def estimate_snr(audio, frame_length=2048):
-    """Оценка SNR без эталонного сигнала"""
-    D = librosa.stft(audio, n_fft=frame_length)
-    magnitude = np.abs(D)
-    power = magnitude ** 2
+import numpy as np
+import librosa
+
+def estimate_snr(audio, frame_length=2048, hop_length=None, top_db=20):
+    """
+    Оценка SNR аудиосигнала с использованием Librosa.
     
-    # Сделать SNR по кадрам. (посмотреть готовые решения)
-    # Разделение на голосовые и неголосовые фреймы
-    mean_power = np.mean(power, axis=0)
-    threshold = 0.5 * np.max(mean_power)
-    voice_frames = power[:, mean_power > threshold]
-    noise_frames = power[:, mean_power <= threshold]
+    Параметры:
+    ----------
+    audio : np.ndarray [shape=(n,)]
+        Входной аудиосигнал.
+    frame_length : int, optional (default=2048)
+        Длина FFT-окна (в сэмплах).
+    hop_length : int, optional (default=None)
+        Шаг между кадрами (в сэмплах). Если None, используется `frame_length // 4`.
+    top_db : float, optional (default=20)
+        Порог в dB для разделения голосовых/шумовых фреймов.
     
-    if len(noise_frames) == 0:
+    Возвращает:
+    -----------
+    snr_db : float
+        SNR в dB. Если шум не обнаружен, возвращает `np.inf`.
+    """
+    if hop_length is None:
+        hop_length = frame_length // 4
+    
+    # Вычисляем спектрограмму мощности
+    S = np.abs(librosa.stft(audio, n_fft=frame_length, hop_length=hop_length)) ** 2
+    
+    # Оцениваем энергию по кадрам
+    frame_energy = np.mean(S, axis=0)
+    
+    # Разделяем голосовые и шумовые фреймы
+    threshold_db = np.max(frame_energy) - top_db
+    threshold_linear = librosa.db_to_power(threshold_db)
+    
+    voice_frames = S[:, frame_energy > threshold_linear]
+    noise_frames = S[:, frame_energy <= threshold_linear]
+    
+    # Если шумовых фреймов нет, SNR считается бесконечным
+    if noise_frames.size == 0:
         return np.inf
     
-    snr = 10 * np.log10(np.mean(voice_frames) / np.mean(noise_frames))
-    return snr
+    # Вычисляем SNR
+    snr_linear = np.mean(voice_frames) / np.mean(noise_frames)
+    snr_db = 10 * np.log10(snr_linear)
+    
+    return snr_db
+
 
 def energy_based_vad(y, sr, top_db=20, frame_length=2048, hop_length=512):
     """VAD с возвратом только речевых сегментов"""
