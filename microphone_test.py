@@ -45,6 +45,25 @@ VAD_PARAMS = {
     'hop_length': 512
 }
 
+def estimate_snr(audio, frame_length=2048):
+    """Оценка SNR без эталонного сигнала"""
+    D = librosa.stft(audio, n_fft=frame_length)
+    magnitude = np.abs(D)
+    power = magnitude ** 2
+    
+    # Сделать SNR по кадрам. (посмотреть готовые решения)
+    # Разделение на голосовые и неголосовые фреймы
+    mean_power = np.mean(power, axis=0)
+    threshold = 0.5 * np.max(mean_power)
+    voice_frames = power[:, mean_power > threshold]
+    noise_frames = power[:, mean_power <= threshold]
+    
+    if len(noise_frames) == 0:
+        return np.inf
+    
+    snr = 10 * np.log10(np.mean(voice_frames) / np.mean(noise_frames))
+    return snr
+
 def energy_based_vad(y, sr, top_db=20, frame_length=2048, hop_length=512):
     """VAD с возвратом только речевых сегментов"""
     # Разбиваем на фреймы
@@ -121,10 +140,6 @@ def extract_mfcc(audio, sr=SAMPLE_RATE):
     
     return mfcc.T
 
-def calculate_pystoi(clean, processed, sr):
-    """Точный расчет STOI с помощью pystoi"""
-    min_len = min(len(clean), len(processed))
-    return stoi(clean[:min_len], processed[:min_len], sr, extended=False)
 
 def predict_stoi(audio, sr=SAMPLE_RATE):
     """Предсказание STOI моделью"""
@@ -175,14 +190,10 @@ def main():
             # Для очищенного аудио (после VAD)
             vad_stoi_model = predict_stoi(processed['speech_for_model'])
             
-            # Расчет pystoi для сравнения
-            clean_16k = resample_audio(original_audio, SAMPLE_RATE, TARGET_SR)
-            vad_stoi_pystoi = calculate_pystoi(clean_16k, processed['speech_only'], TARGET_SR)
-            
             # 5. Вывод результатов
             print("\n=== Результаты анализа ===")
             print(f"STOI после VAD (модель): {vad_stoi_model:.4f}")
-            print(f"STOI после VAD (pystoi): {vad_stoi_pystoi:.4f}")
+            print("SNR:", estimate_snr(processed['speech_for_model']), "dB")
             
             # 6. Интерпретация
             print("\nИнтерпретация качества после VAD:")
