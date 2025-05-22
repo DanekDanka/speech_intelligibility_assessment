@@ -67,7 +67,8 @@ def evaluate_stoi_to_csv(clean_dir, noisy_dir, output_csv):
 
 if __name__ == "__main__":
     clean_dir = "/home/danya/develop/datasets/CMU-MOSEI/Audio/vad/"
-    noisy_dir = "/home/danya/develop/datasets/CMU-MOSEI/Audio/vad_noise/"
+#     noisy_dir = "/home/danya/develop/datasets/CMU-MOSEI/Audio/vad_noise/"
+    noisy_dir = "/home/danya/develop/datasets/CMU-MOSEI/Audio/vad_reverberation/"
     output_csv = "/home/danya/develop/datasets/CMU-MOSEI/Audio/stoi_results.csv"
     
     evaluate_stoi_to_csv(clean_dir, noisy_dir, output_csv)
