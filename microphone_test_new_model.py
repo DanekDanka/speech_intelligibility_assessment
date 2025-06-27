@@ -11,12 +11,15 @@ from torch import nn
 import matplotlib.pyplot as plt
 import warnings
 import noisereduce as nr
+import sys
 
 # Конфигурация
 class Config:
     SAMPLE_RATE = 48000
     TARGET_SR = 16000  # Для модели и VAD
-    DURATION = 3  # Длительность записи в секундах
+    RECORD_DURATION = 10  # Общая длительность записи в секундах
+    SEGMENT_DURATION = 3  # Длительность сегмента в секундах
+    STEP_SIZE = 1  # Шаг между сегментами в секундах
     N_FFT = 512
     HOP_LENGTH = 256
     N_MELS = 64
@@ -36,40 +39,40 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 class STOIPredictor(nn.Module):
     def __init__(self):
         super(STOIPredictor, self).__init__()
-        
+
         self.conv_layers = nn.Sequential(
             nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(16),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2),
-            
+
             nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2),
-            
+
             nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2),
-            
+
             nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2)
         )
-        
+
         self.flatten_size = 5632  # Фиксированный размер для совместимости
-        
+
         self.fc_layers = nn.Sequential(
             nn.Linear(self.flatten_size, 256),
             nn.ReLU(),
             nn.Dropout(0.5),
-            
+
             nn.Linear(256, 64),
             nn.ReLU(),
             nn.Dropout(0.3),
-            
+
             nn.Linear(64, 1)
         )
 
@@ -77,15 +80,15 @@ class STOIPredictor(nn.Module):
         x = x.unsqueeze(1)
         x = self.conv_layers(x)
         x = x.view(x.size(0), -1)
-        
+
         # Автоматическая коррекция размера
         if x.size(1) != self.flatten_size:
             x = nn.functional.interpolate(
-                x.unsqueeze(0).unsqueeze(0), 
-                size=self.flatten_size, 
+                x.unsqueeze(0).unsqueeze(0),
+                size=self.flatten_size,
                 mode='linear'
             ).squeeze(0).squeeze(0)
-            
+
         x = self.fc_layers(x)
         return x
 
@@ -103,9 +106,9 @@ def load_model():
 
 # Запись аудио с микрофона
 def record_audio():
-    print(f"\nГоворите в микрофон {Config.DURATION} секунд...")
+    print(f"\nГоворите в микрофон {Config.RECORD_DURATION} секунд...")
     audio = sd.rec(
-        int(Config.DURATION * Config.SAMPLE_RATE),
+        int(Config.RECORD_DURATION * Config.SAMPLE_RATE),
         samplerate=Config.SAMPLE_RATE,
         channels=1,
         dtype='float32'
@@ -113,61 +116,23 @@ def record_audio():
     sd.wait()
     return audio.flatten()
 
+# Нарезка аудио на сегменты
+def segment_audio(audio, sr):
+    """Нарезает аудио на сегменты с заданным шагом"""
+    segment_length = int(Config.SEGMENT_DURATION * sr)
+    step_samples = int(Config.STEP_SIZE * sr)
+    
+    segments = []
+    for start in range(0, len(audio) - segment_length + 1, step_samples):
+        end = start + segment_length
+        segment = audio[start:end]
+        segments.append(segment)
+    
+    return segments
+
 # Ресемплирование аудио
 def resample_audio(audio, original_sr, target_sr):
     return librosa.resample(audio, orig_sr=original_sr, target_sr=target_sr)
-#     duration = len(audio) / original_sr
-#     num_samples = int(duration * target_sr)
-#     return resample(audio, num_samples)
-
-import webrtcvad
-import numpy as np
-
-def energy_based_vad(y, sr, aggressiveness=3, frame_duration_ms=30):
-    """
-    Voice Activity Detection с использованием WebRTC VAD
-    
-    Параметры:
-        y (np.array): Аудиосигнал (должен быть 16-битным моно PCM)
-        sr (int): Частота дискретизации (поддерживает 8000, 16000, 32000, 48000 Гц)
-        aggressiveness (int): Агрессивность VAD (0-3, где 3 самый строгий)
-        frame_duration_ms (int): Длительность фрейма в миллисекундах (10, 20 или 30)
-        
-    Возвращает:
-        np.array: Аудио только с речевыми сегментами
-    """
-    # Проверка поддерживаемых параметров
-    if sr not in [8000, 16000, 32000, 48000]:
-        raise ValueError("WebRTC VAD поддерживает только sr=8000,16000,32000,48000")
-    
-    if frame_duration_ms not in [10, 20, 30]:
-        raise ValueError("Поддерживаются frame_duration_ms=10,20,30")
-    
-    if aggressiveness not in [0, 1, 2, 3]:
-        raise ValueError("aggressiveness должен быть 0,1,2,3")
-
-    # Конвертация в 16-битный PCM
-    if y.dtype != np.int16:
-        y = (y * 32767).astype(np.int16)
-    
-    # Инициализация VAD
-    vad = webrtcvad.Vad(aggressiveness)
-    frame_length = int(sr * frame_duration_ms / 1000)
-    frames = np.array_split(y, np.arange(frame_length, len(y), frame_length))
-    
-    # Определение речевых фреймов
-    speech_frames = []
-    for frame in frames:
-        if len(frame) < frame_length:
-            continue  # Пропускаем неполные фреймы
-        is_speech = vad.is_speech(frame.tobytes(), sr)
-        if is_speech:
-            speech_frames.append(frame)
-    
-    if len(speech_frames) == 0:
-        return np.array([], dtype=np.int16)
-    
-    return np.concatenate(speech_frames)
 
 # VAD на основе энергии
 def energy_based_vad(y, sr, top_db=20, frame_length=2048, hop_length=512):
@@ -182,7 +147,7 @@ def energy_based_vad(y, sr, top_db=20, frame_length=2048, hop_length=512):
             start = i * hop_length
             end = start + frame_length
             speech_audio.extend(y[start:end])
-    
+
     return np.array(speech_audio) if len(speech_audio) > 0 else y
 
 # Обработка аудио (VAD и ресемплинг)
@@ -190,13 +155,13 @@ def process_audio(audio):
     try:
         # Ресемплирование для VAD
         audio_vad = resample_audio(audio, Config.SAMPLE_RATE, Config.TARGET_SR)
-        
+
         # VAD
-        speech_only = energy_based_vad(audio_vad, Config.TARGET_SR)#, **Config.VAD_PARAMS)
-        
+        speech_only = energy_based_vad(audio_vad, Config.TARGET_SR)
+
         # Ресемплирование для модели
         speech_for_model = resample_audio(speech_only, Config.TARGET_SR, Config.TARGET_SR)
-        
+
         return {
             'original': audio,
             'speech_only': speech_only,
@@ -219,111 +184,76 @@ def extract_mel_spectrogram(audio, sr):
             n_mels=Config.N_MELS
         )
         mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
-        
+
         # Нормализация с защитой от деления на ноль
         if np.max(mel_spec_db) - np.min(mel_spec_db) > 0:
             mel_spec_db = (mel_spec_db - np.min(mel_spec_db)) / (np.max(mel_spec_db) - np.min(mel_spec_db))
         else:
             mel_spec_db = np.zeros_like(mel_spec_db)
-        
+
         # Фиксированный размер
         if mel_spec_db.shape[1] < Config.TARGET_FRAMES:
             pad_width = ((0, 0), (0, Config.TARGET_FRAMES - mel_spec_db.shape[1]))
             mel_spec_db = np.pad(mel_spec_db, pad_width, mode='constant')
         else:
             mel_spec_db = mel_spec_db[:, :Config.TARGET_FRAMES]
-            
+
         return mel_spec_db
     except Exception as e:
         print(f"Ошибка извлечения мел-спектрограммы: {e}")
         return np.zeros((Config.N_MELS, Config.TARGET_FRAMES))
 
-
+# Оценка SNR
 def estimate_snr(audio, sr=16000, frame_length=2048, hop_length=512, use_nn=True):
-    """
-    Оценка SNR с использованием библиотеки noisereduce
-    
-    Параметры:
-        audio (np.array): Аудиосигнал
-        sr (int): Частота дискретизации
-        frame_length (int): Размер окна для анализа
-        hop_length (int): Шаг между окнами
-        use_nn (bool): Использовать нейросетевой метод (если True)
-        
-    Возвращает:
-        float: Оценка SNR в dB
-    """
     try:
         if len(audio) < frame_length:
             return 0.0
-            
+
         if use_nn:
             # Метод с использованием нейросетевого шумоподавления
-            noisy_part = audio[:frame_length*3]  # Первые 10 фреймов как шум
+            noisy_part = audio[:frame_length*3]
             reduced_noise = nr.reduce_noise(y=audio, y_noise=noisy_part, sr=sr)
-            
+
             # Энергия сигнала и шума
             signal_energy = np.mean(reduced_noise**2)
             noise_energy = np.mean((audio - reduced_noise)**2)
         else:
             # Стандартный энергетический метод
-            noisy_part = audio[:frame_length*3]  # Первые 3 фрейма как шум
+            noisy_part = audio[:frame_length*3]
             signal_part = audio[frame_length*3:]
-            
+
             # Энергия сигнала и шума
             noise_energy = np.mean(noisy_part**2)
             signal_energy = np.mean(signal_part**2) - noise_energy
-            
+
             if signal_energy <= 0:
                 return 0.0
-        
+
         # Расчет SNR
-        snr_linear = signal_energy / (noise_energy + 1e-10)  # Добавляем маленькое значение для стабильности
+        snr_linear = signal_energy / (noise_energy + 1e-10)
         snr_db = 10 * np.log10(snr_linear)
-        
+
         return snr_db
-        return max(0.0, snr_db)  # Ограничиваем снизу нулем
-        
+#         return max(0.0, snr_db)
+
     except Exception as e:
         print(f"Ошибка оценки SNR: {str(e)}")
         return 0.0
-
-# Оценка SNR
-# def estimate_snr(audio, frame_length=2048, hop_length=None, top_db=20):
-#     if hop_length is None:
-#         hop_length = frame_length // 4
-# 
-#     try:
-#         S = np.abs(librosa.stft(audio, n_fft=frame_length, hop_length=hop_length)) ** 2
-#         frame_energy = np.mean(S, axis=0)
-#         threshold_db = np.max(frame_energy) - top_db
-#         threshold_linear = librosa.db_to_power(threshold_db)
-# 
-#         voice_frames = S[:, frame_energy > threshold_linear]
-#         noise_frames = S[:, frame_energy <= threshold_linear]
-# 
-#         if noise_frames.size == 0:
-#             return np.inf
-# 
-#         snr_linear = np.mean(voice_frames) / np.mean(noise_frames)
-#         return 10 * np.log10(snr_linear)
-#     except:
-#         return 0
 
 # Предсказание STOI
 def predict_stoi(model, audio, sr):
     if sr != Config.TARGET_SR:
         audio = librosa.resample(audio, orig_sr=sr, target_sr=Config.TARGET_SR)
-    
+
     audio = audio / np.max(np.abs(audio))
-    
-    n_samples = Config.TARGET_SR * Config.DURATION
+
+    n_samples = Config.TARGET_SR * Config.SEGMENT_DURATION
     if len(audio) > n_samples:
         audio = audio[:n_samples]
     else:
         padding = n_samples - len(audio)
         audio = np.pad(audio, (0, padding), mode='constant')
-    
+
     mel_spec = librosa.feature.melspectrogram(
         y=audio,
         sr=sr,
@@ -333,26 +263,24 @@ def predict_stoi(model, audio, sr):
     )
     mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
     mel_spec_db = (mel_spec_db - mel_spec_db.min()) / (mel_spec_db.max() - mel_spec_db.min())
-    
-    mel_spec_db = torch.FloatTensor(mel_spec_db)
-    
+
     mel_spec_tensor = torch.FloatTensor(mel_spec_db).unsqueeze(0).to(Config.DEVICE)
-    
+
     with torch.no_grad():
         prediction = model(mel_spec_tensor)
-    
-    return max(0.0, min(1.0, prediction.item()))  # Ограничиваем диапазон [0, 1]
+
+    return max(0.0, min(1.0, prediction.item()))
 
 # Сохранение аудиофайлов
 def save_audio_segments(audio_dict, temp_dir=None):
     if temp_dir is None:
         temp_dir = tempfile.gettempdir()
-    
+
     paths = {
         'original': os.path.join(temp_dir, "original.wav"),
         'speech_only': os.path.join(temp_dir, "speech_only.wav")
     }
-    
+
     try:
         sf.write(paths['original'], audio_dict['original'], audio_dict['sr_original'])
         sf.write(paths['speech_only'], audio_dict['speech_only'], audio_dict['sr_processed'])
@@ -364,19 +292,19 @@ def save_audio_segments(audio_dict, temp_dir=None):
 def plot_audio_waveforms(audio_dict, save_path=None):
     try:
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
-        
+
         ax1.plot(audio_dict['original'])
         ax1.set_title('Original Audio')
         ax1.set_xlabel('Samples')
         ax1.set_ylabel('Amplitude')
-        
+
         ax2.plot(audio_dict['speech_only'])
         ax2.set_title('Speech Only (after VAD)')
         ax2.set_xlabel('Samples')
         ax2.set_ylabel('Amplitude')
-        
+
         plt.tight_layout()
-        
+
         if save_path:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             plt.savefig(save_path)
@@ -404,8 +332,17 @@ def main():
     sd.default.samplerate = Config.SAMPLE_RATE
 
     while True:
-        input("\nНажмите Enter для начала записи или 'q' для выхода... ")
+        user_input = input("\nНажмите Enter для начала записи или 'q' для выхода... ")
         
+        # Проверка на выход
+        if user_input.lower() == 'q':
+            print("\nЗавершение работы программы...")
+            sys.exit(0)
+            
+        # Пропускаем пустой ввод (просто Enter)
+        elif user_input != '':
+            continue
+
         try:
             # Запись аудио
             audio = record_audio()
@@ -413,50 +350,75 @@ def main():
                 print("Ошибка: не удалось записать аудио")
                 continue
 
-            # Обработка аудио
-            processed = process_audio(audio)
-            if processed is None:
-                print("Ошибка обработки аудио")
+            # Нарезка на сегменты
+            segments = segment_audio(audio, Config.SAMPLE_RATE)
+            if not segments:
+                print("Ошибка: не удалось нарезать аудио на сегменты")
                 continue
 
-            # Сохранение и визуализация
-            saved_paths = save_audio_segments(processed)
-            plot_path = os.path.join(tempfile.gettempdir(), "audio_waveforms.png")
-            plot_success = plot_audio_waveforms(processed, plot_path)
+            print(f"\nАудио разделено на {len(segments)} сегментов по {Config.SEGMENT_DURATION} секунд с шагом {Config.STEP_SIZE} сек")
+
+            stoi_values = []
+            snr_values = []
             
-            if saved_paths:
-                print(f"\nАудио сохранено в:\n- {saved_paths['original']}\n- {saved_paths['speech_only']}")
-            if plot_success:
-                print(f"Визуализация сохранена: {plot_path}")
+            for i, segment in enumerate(segments):
+                # Обработка сегмента
+                processed = process_audio(segment)
+                if processed is None:
+                    print(f"Ошибка обработки сегмента {i+1}")
+                    continue
 
-            # Предсказание STOI
-            orig_audio_resampled = resample_audio(
-                processed['original'], 
-                Config.SAMPLE_RATE, 
-                Config.TARGET_SR
-            )
-            orig_stoi = predict_stoi(model, orig_audio_resampled, Config.TARGET_SR)
-            vad_stoi = predict_stoi(model, processed['speech_for_model'], Config.TARGET_SR)
-            snr = estimate_snr(processed['speech_for_model'])
+                # Предсказание STOI
+                vad_stoi = predict_stoi(model, processed['speech_for_model'], Config.TARGET_SR)
+                snr = estimate_snr(processed['speech_for_model'])
+                
+                stoi_values.append(vad_stoi)
+                snr_values.append(snr)
+                
+                # Вывод результатов для сегмента
+                print(f"\nСегмент {i+1} (с {i*Config.STEP_SIZE:.1f} по {i*Config.STEP_SIZE+Config.SEGMENT_DURATION:.1f} сек):")
+                print(f"STOI: {vad_stoi:.4f}")
+                print(f"SNR: {snr:.2f} dB")
+                
+                # Интерпретация для сегмента
+                print("Качество речи:", end=" ")
+                if vad_stoi > 0.85:
+                    print("Отличное")
+                elif vad_stoi > 0.7:
+                    print("Хорошее")
+                elif vad_stoi > 0.5:
+                    print("Удовлетворительное")
+                elif vad_stoi > 0.3:
+                    print("Низкое")
+                else:
+                    print("Очень плохое")
 
-            # Вывод результатов
-            print("\n=== Результаты анализа ===")
-            print(f"STOI оригинального аудио: {orig_stoi:.4f}")
-            print(f"STOI после VAD: {vad_stoi:.4f}")
-            print(f"SNR: {snr:.2f} dB")
+            # Вывод средних значений
+            if stoi_values:
+                avg_stoi = np.mean(stoi_values)
+                avg_snr = np.mean(snr_values)
+                
+                print("\n=== Итоговые результаты ===")
+                print(f"Средний STOI: {avg_stoi:.4f}")
+                print(f"Средний SNR: {avg_snr:.2f} dB")
+                
+                print("\nОбщее качество речи:", end=" ")
+                if avg_stoi > 0.85:
+                    print("Отличное качество!")
+                elif avg_stoi > 0.7:
+                    print("Хорошее качество")
+                elif avg_stoi > 0.5:
+                    print("Удовлетворительное качество")
+                elif avg_stoi > 0.3:
+                    print("Низкое качество")
+                else:
+                    print("Очень плохое качество")
 
-            # Интерпретация
-            print("\nКачество речи:")
-            if vad_stoi > 0.85:
-                print("Отличное качество!")
-            elif vad_stoi > 0.7:
-                print("Хорошее качество")
-            elif vad_stoi > 0.5:
-                print("Удовлетворительное качество")
-            elif vad_stoi > 0.3:
-                print("Низкое качество")
-            else:
-                print("Очень плохое качество")
+                # Визуализация только последнего сегмента для примера
+                plot_path = os.path.join(tempfile.gettempdir(), "audio_waveforms.png")
+                plot_success = plot_audio_waveforms(processed, plot_path)
+                if plot_success:
+                    print(f"\nВизуализация последнего сегмента сохранена: {plot_path}")
 
         except KeyboardInterrupt:
             print("\nЗавершение работы...")
