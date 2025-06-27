@@ -13,10 +13,9 @@ import warnings
 import noisereduce as nr
 import sys
 
-# Конфигурация
 class Config:
     SAMPLE_RATE = 48000
-    TARGET_SR = 16000  # Для модели и VAD
+    TARGET_SR = 16000
     RECORD_DURATION = 10  # Общая длительность записи в секундах
     SEGMENT_DURATION = 3  # Длительность сегмента в секундах
     STEP_SIZE = 1  # Шаг между сегментами в секундах
@@ -30,12 +29,10 @@ class Config:
     }
     MODEL_PATH = "best_model.pth"  # Путь к модели
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    TARGET_FRAMES = 88  # 5632 / 64 = 88 (из размера flatten слоя)
+    TARGET_FRAMES = 88
 
-# Подавление предупреждений
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-# Модель для предсказания STOI
 class STOIPredictor(nn.Module):
     def __init__(self):
         super(STOIPredictor, self).__init__()
@@ -62,7 +59,7 @@ class STOIPredictor(nn.Module):
             nn.MaxPool2d(kernel_size=2, stride=2)
         )
 
-        self.flatten_size = 5632  # Фиксированный размер для совместимости
+        self.flatten_size = 5632
 
         self.fc_layers = nn.Sequential(
             nn.Linear(self.flatten_size, 256),
@@ -81,7 +78,6 @@ class STOIPredictor(nn.Module):
         x = self.conv_layers(x)
         x = x.view(x.size(0), -1)
 
-        # Автоматическая коррекция размера
         if x.size(1) != self.flatten_size:
             x = nn.functional.interpolate(
                 x.unsqueeze(0).unsqueeze(0),
@@ -134,7 +130,7 @@ def segment_audio(audio, sr):
 def resample_audio(audio, original_sr, target_sr):
     return librosa.resample(audio, orig_sr=original_sr, target_sr=target_sr)
 
-# VAD на основе энергии
+# VAD
 def energy_based_vad(y, sr, top_db=20, frame_length=2048, hop_length=512):
     frames = librosa.util.frame(y, frame_length=frame_length, hop_length=hop_length)
     energy = np.sum(frames**2, axis=0)
@@ -153,13 +149,8 @@ def energy_based_vad(y, sr, top_db=20, frame_length=2048, hop_length=512):
 # Обработка аудио (VAD и ресемплинг)
 def process_audio(audio):
     try:
-        # Ресемплирование для VAD
         audio_vad = resample_audio(audio, Config.SAMPLE_RATE, Config.TARGET_SR)
-
-        # VAD
         speech_only = energy_based_vad(audio_vad, Config.TARGET_SR)
-
-        # Ресемплирование для модели
         speech_for_model = resample_audio(speech_only, Config.TARGET_SR, Config.TARGET_SR)
 
         return {
@@ -185,13 +176,11 @@ def extract_mel_spectrogram(audio, sr):
         )
         mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
 
-        # Нормализация с защитой от деления на ноль
         if np.max(mel_spec_db) - np.min(mel_spec_db) > 0:
             mel_spec_db = (mel_spec_db - np.min(mel_spec_db)) / (np.max(mel_spec_db) - np.min(mel_spec_db))
         else:
             mel_spec_db = np.zeros_like(mel_spec_db)
 
-        # Фиксированный размер
         if mel_spec_db.shape[1] < Config.TARGET_FRAMES:
             pad_width = ((0, 0), (0, Config.TARGET_FRAMES - mel_spec_db.shape[1]))
             mel_spec_db = np.pad(mel_spec_db, pad_width, mode='constant')
@@ -204,41 +193,21 @@ def extract_mel_spectrogram(audio, sr):
         return np.zeros((Config.N_MELS, Config.TARGET_FRAMES))
 
 # Оценка SNR
-def estimate_snr(audio, sr=16000, frame_length=2048, hop_length=512, use_nn=True):
-    try:
-        if len(audio) < frame_length:
-            return 0.0
-
-        if use_nn:
-            # Метод с использованием нейросетевого шумоподавления
-            noisy_part = audio[:frame_length*3]
-            reduced_noise = nr.reduce_noise(y=audio, y_noise=noisy_part, sr=sr)
-
-            # Энергия сигнала и шума
-            signal_energy = np.mean(reduced_noise**2)
-            noise_energy = np.mean((audio - reduced_noise)**2)
-        else:
-            # Стандартный энергетический метод
-            noisy_part = audio[:frame_length*3]
-            signal_part = audio[frame_length*3:]
-
-            # Энергия сигнала и шума
-            noise_energy = np.mean(noisy_part**2)
-            signal_energy = np.mean(signal_part**2) - noise_energy
-
-            if signal_energy <= 0:
-                return 0.0
-
-        # Расчет SNR
-        snr_linear = signal_energy / (noise_energy + 1e-10)
-        snr_db = 10 * np.log10(snr_linear)
-
-        return snr_db
-#         return max(0.0, snr_db)
-
-    except Exception as e:
-        print(f"Ошибка оценки SNR: {str(e)}")
+def estimate_snr(audio, sr=16000, frame_length=2048, hop_length=512):
+    if len(audio) < frame_length:
+        print("[ERROR] Audio length less than frame length!")
         return 0.0
+
+    noisy_part = audio[:frame_length*3]
+    reduced_noise = nr.reduce_noise(y=audio, y_noise=noisy_part, sr=sr)
+
+    signal_energy = np.mean(reduced_noise**2)
+    noise_energy = np.mean((audio - reduced_noise)**2)
+
+    snr_linear = signal_energy / (noise_energy + 1e-10)
+    snr_db = 10 * np.log10(snr_linear)
+
+    return snr_db
 
 # Предсказание STOI
 def predict_stoi(model, audio, sr):
@@ -267,7 +236,7 @@ def predict_stoi(model, audio, sr):
     mel_spec_tensor = torch.FloatTensor(mel_spec_db).unsqueeze(0).to(Config.DEVICE)
 
     with torch.no_grad():
-        prediction = model(mel_spec_tensor)
+        prediction =  model(mel_spec_tensor)
 
     return max(0.0, min(1.0, prediction.item()))
 
@@ -281,12 +250,9 @@ def save_audio_segments(audio_dict, temp_dir=None):
         'speech_only': os.path.join(temp_dir, "speech_only.wav")
     }
 
-    try:
-        sf.write(paths['original'], audio_dict['original'], audio_dict['sr_original'])
-        sf.write(paths['speech_only'], audio_dict['speech_only'], audio_dict['sr_processed'])
-        return paths
-    except:
-        return None
+    sf.write(paths['original'], audio_dict['original'], audio_dict['sr_original'])
+    sf.write(paths['speech_only'], audio_dict['speech_only'], audio_dict['sr_processed'])
+    return paths
 
 # Визуализация аудиосигналов
 def plot_audio_waveforms(audio_dict, save_path=None):
@@ -318,7 +284,6 @@ def plot_audio_waveforms(audio_dict, save_path=None):
 
 # Основная функция
 def main():
-    # Инициализация модели
     model = load_model()
     if model is None:
         print("Не удалось загрузить модель. Завершение работы.")
@@ -334,23 +299,19 @@ def main():
     while True:
         user_input = input("\nНажмите Enter для начала записи или 'q' для выхода... ")
         
-        # Проверка на выход
         if user_input.lower() == 'q':
             print("\nЗавершение работы программы...")
             sys.exit(0)
             
-        # Пропускаем пустой ввод (просто Enter)
         elif user_input != '':
             continue
 
         try:
-            # Запись аудио
             audio = record_audio()
             if len(audio) == 0:
                 print("Ошибка: не удалось записать аудио")
                 continue
 
-            # Нарезка на сегменты
             segments = segment_audio(audio, Config.SAMPLE_RATE)
             if not segments:
                 print("Ошибка: не удалось нарезать аудио на сегменты")
@@ -362,25 +323,21 @@ def main():
             snr_values = []
             
             for i, segment in enumerate(segments):
-                # Обработка сегмента
                 processed = process_audio(segment)
                 if processed is None:
                     print(f"Ошибка обработки сегмента {i+1}")
                     continue
 
-                # Предсказание STOI
                 vad_stoi = predict_stoi(model, processed['speech_for_model'], Config.TARGET_SR)
                 snr = estimate_snr(processed['speech_for_model'])
                 
                 stoi_values.append(vad_stoi)
                 snr_values.append(snr)
                 
-                # Вывод результатов для сегмента
                 print(f"\nСегмент {i+1} (с {i*Config.STEP_SIZE:.1f} по {i*Config.STEP_SIZE+Config.SEGMENT_DURATION:.1f} сек):")
                 print(f"STOI: {vad_stoi:.4f}")
                 print(f"SNR: {snr:.2f} dB")
                 
-                # Интерпретация для сегмента
                 print("Качество речи:", end=" ")
                 if vad_stoi > 0.85:
                     print("Отличное")
@@ -393,7 +350,6 @@ def main():
                 else:
                     print("Очень плохое")
 
-            # Вывод средних значений
             if stoi_values:
                 avg_stoi = np.mean(stoi_values)
                 avg_snr = np.mean(snr_values)
@@ -414,7 +370,6 @@ def main():
                 else:
                     print("Очень плохое качество")
 
-                # Визуализация только последнего сегмента для примера
                 plot_path = os.path.join(tempfile.gettempdir(), "audio_waveforms.png")
                 plot_success = plot_audio_waveforms(processed, plot_path)
                 if plot_success:
