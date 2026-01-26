@@ -2,6 +2,7 @@
 Скрипт для тестирования модели предсказания STOI
 """
 import os
+import warnings
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -13,6 +14,11 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 from dataset import STOIDataset
 from model import STOIPredictor
+
+# Подавляем предупреждения о градиентах для замороженных моделей
+warnings.filterwarnings("ignore", message=".*None of the inputs have requires_grad=True.*")
+warnings.filterwarnings("ignore", category=UserWarning, message=".*gradient_checkpointing.*")
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*gradient_checkpointing.*")
 
 
 def test_model(model, dataloader, device):
@@ -30,20 +36,35 @@ def test_model(model, dataloader, device):
         pbar = tqdm(dataloader, desc='Testing')
         for batch_idx, batch in enumerate(pbar):
             waveform = batch['waveform'].to(device)
-            features = batch['features'].to(device)
             stoi_true = batch['stoi'].to(device)
             filenames = batch['filename']
             
             # Forward pass
-            stoi_pred = model(waveform, features)
+            stoi_pred = model(waveform)
+            
+            # Убеждаемся, что размеры правильные
+            stoi_pred_flat = stoi_pred.view(-1)  # (batch_size,)
+            stoi_true_flat = stoi_true.view(-1)  # (batch_size,)
             
             # Сохраняем результаты (сразу переносим на CPU для экономии памяти)
-            all_preds.extend(stoi_pred.squeeze().cpu().numpy())
-            all_targets.extend(stoi_true.cpu().numpy())
+            preds_np = stoi_pred_flat.cpu().numpy()
+            targets_np = stoi_true_flat.cpu().numpy()
+            
+            # Преобразуем в список, если это скаляр
+            if preds_np.ndim == 0:
+                all_preds.append(float(preds_np))
+            else:
+                all_preds.extend(preds_np.tolist())
+            
+            if targets_np.ndim == 0:
+                all_targets.append(float(targets_np))
+            else:
+                all_targets.extend(targets_np.tolist())
+            
             all_filenames.extend(filenames)
             
-            # Периодически очищаем кэш GPU
-            if device == 'cuda' and (batch_idx + 1) % 10 == 0:
+            # Периодически очищаем кэш GPU (реже, так как больше памяти)
+            if device == 'cuda' and (batch_idx + 1) % 50 == 0:
                 torch.cuda.empty_cache()
     
     all_preds = np.array(all_preds)
@@ -134,32 +155,38 @@ def plot_results(results, output_dir):
 
 def main():
     parser = argparse.ArgumentParser(description='Тестирование модели предсказания STOI')
-    parser.add_argument('--checkpoint', type=str, required=True,
+    parser.add_argument('--checkpoint', type=str, required=True, default='checkpoints/best_model.pt',
                        help='Путь к чекпоинту модели')
     parser.add_argument('--audio_dir', type=str,
-                       default='/home/danya/datasets/CMU-MOSEI/Audio/noise_reverb/',
-                       help='Директория с обработанными аудио файлами')
+                       default='/home/danya/datasets/CMU-MOSEI/Audio/',
+                       help='Базовая директория с обработанными аудио файлами (будет искать в поддиректориях noise, reverb, noise_reverb)')
     parser.add_argument('--original_dir', type=str,
                        default='/home/danya/datasets/CMU-MOSEI/Audio/WAV_16000/',
                        help='Директория с оригинальными аудио файлами')
     parser.add_argument('--output_dir', type=str, default='./test_results',
                        help='Директория для сохранения результатов')
-    parser.add_argument('--batch_size', type=int, default=2,
-                       help='Размер батча (меньше для экономии памяти GPU)')
+    parser.add_argument('--batch_size', type=int, default=16,
+                       help='Размер батча')
     parser.add_argument('--wav2vec_model', type=str, default='facebook/wav2vec2-base',
                        help='Название модели wav2vec2')
-    parser.add_argument('--hidden_dim', type=int, default=256,
+    parser.add_argument('--hidden_dim', type=int, default=512,
                        help='Размерность скрытых слоев')
-    parser.add_argument('--num_layers', type=int, default=3,
+    parser.add_argument('--num_layers', type=int, default=5,
                        help='Количество полносвязных слоев')
-    parser.add_argument('--dropout', type=float, default=0.1,
+    parser.add_argument('--dropout', type=float, default=0.2,
                        help='Dropout rate')
+    parser.add_argument('--use_residual', action='store_true', default=True,
+                       help='Использовать residual connections')
+    parser.add_argument('--freeze_wav2vec', action='store_true', default=True,
+                       help='Замораживать веса wav2vec (False = fine-tuning)')
     parser.add_argument('--sample_rate', type=int, default=16000,
                        help='Частота дискретизации')
     parser.add_argument('--max_length', type=float, default=10.0,
                        help='Максимальная длина аудио в секундах')
     parser.add_argument('--max_samples', type=int, default=None,
                        help='Максимальное количество образцов для тестирования (None = использовать все)')
+    parser.add_argument('--single_chunk_per_audio', action='store_true', default=False,
+                       help='Брать только один чанк на аудио (для быстрого тестового прогона)')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                        help='Устройство для тестирования')
     
@@ -170,12 +197,16 @@ def main():
     
     # Создаем dataset
     print("Загрузка тестового датасета...")
+    print(f"Базовая директория: {args.audio_dir}")
+    print("Ищем файлы в поддиректориях: noise, reverb, noise_reverb, extreme_stoi")
     dataset = STOIDataset(
         audio_dir=args.audio_dir,
         original_dir=args.original_dir,
         sample_rate=args.sample_rate,
         max_length_seconds=args.max_length,
-        use_wav2vec=True
+        use_wav2vec=True,
+        subdirs=['noise', 'reverb', 'noise_reverb', 'extreme_stoi'],  # Ищем файлы в этих поддиректориях
+        single_chunk_per_audio=args.single_chunk_per_audio
     )
     
     print(f"Тестовых образцов: {len(dataset)}")
@@ -194,8 +225,9 @@ def main():
         dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=4,
-        pin_memory=True if args.device == 'cuda' else False
+        num_workers=8,
+        pin_memory=True if args.device == 'cuda' else False,
+        persistent_workers=True if args.device == 'cuda' else False
     )
     
     # Создаем модель
@@ -206,11 +238,16 @@ def main():
         num_layers=args.num_layers,
         dropout=args.dropout,
         use_audio_features=True,
-        use_metadata_features=True
+        use_metadata_features=False,
+        use_residual=args.use_residual,
+        freeze_wav2vec=args.freeze_wav2vec
     ).to(args.device)
     
     # Загружаем чекпоинт
-    checkpoint = torch.load(args.checkpoint, map_location=args.device)
+    # В PyTorch 2.6+ по умолчанию weights_only=True, но наши чекпоинты содержат numpy скаляры
+    # Поскольку это наш собственный чекпоинт, безопасно использовать weights_only=False
+    checkpoint = torch.load(args.checkpoint, map_location=args.device, weights_only=False)
+    
     model.load_state_dict(checkpoint['model_state_dict'])
     print(f"Модель загружена из эпохи {checkpoint.get('epoch', 'unknown')}")
     

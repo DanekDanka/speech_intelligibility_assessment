@@ -3,12 +3,13 @@ Dataset для загрузки аудио файлов и предсказан�
 """
 import os
 import re
+import math
 import torch
 import torchaudio
 from torch.utils.data import Dataset
 from pathlib import Path
-import numpy as np
-import librosa
+import pickle
+from tqdm import tqdm
 
 
 class STOIDataset(Dataset):
@@ -27,31 +28,74 @@ class STOIDataset(Dataset):
                  sample_rate=16000,
                  max_length_seconds=10,
                  use_wav2vec=True,
-                 target_stoi=None):
+                 target_stoi=None,
+                 subdirs=None,
+                 cache_stoi=True,
+                 cache_file=None,
+                 single_chunk_per_audio=False):
         """
         Args:
-            audio_dir: Директория с обработанными аудио файлами
+            audio_dir: Базовая директория с обработанными аудио файлами или список директорий
             original_dir: Директория с оригинальными аудио файлами (для вычисления STOI)
             sample_rate: Частота дискретизации
             max_length_seconds: Максимальная длина аудио в секундах
             use_wav2vec: Использовать ли wav2vec для извлечения признаков
             target_stoi: Если указан, используется как целевое значение STOI (для тестирования)
+            subdirs: Список поддиректорий для поиска файлов (например, ['noise', 'reverb', 'noise_reverb']).
+                     Если None, автоматически ищет в поддиректориях noise, reverb, noise_reverb
+            single_chunk_per_audio: Если True, берется только один чанк (первый) на аудио
         """
-        self.audio_dir = Path(audio_dir)
         self.original_dir = Path(original_dir)
         self.sample_rate = sample_rate
-        self.max_length = int(max_length_seconds * sample_rate)
+        self.chunk_length_seconds = max_length_seconds
+        self.chunk_length = int(max_length_seconds * sample_rate)
+        if self.chunk_length <= 0:
+            raise ValueError("max_length_seconds должен быть > 0")
         self.use_wav2vec = use_wav2vec
+        self.single_chunk_per_audio = single_chunk_per_audio
+        
+        # Обрабатываем audio_dir - может быть строка или список
+        if isinstance(audio_dir, (list, tuple)):
+            audio_dirs = [Path(d) for d in audio_dir]
+        else:
+            base_dir = Path(audio_dir)
+            # Если subdirs не указан, используем стандартные поддиректории
+            if subdirs is None:
+                subdirs = ['noise', 'reverb', 'noise_reverb', 'extreme_stoi']
+            
+            # Собираем список директорий для поиска
+            audio_dirs = []
+            for subdir in subdirs:
+                dir_path = base_dir / subdir
+                if dir_path.exists():
+                    audio_dirs.append(dir_path)
+                else:
+                    print(f"Предупреждение: поддиректория {dir_path} не найдена, пропускаем")
+            
+            # Если не нашли поддиректории, используем базовую директорию
+            if len(audio_dirs) == 0:
+                if base_dir.exists():
+                    audio_dirs = [base_dir]
+                    print(f"Используем базовую директорию: {base_dir}")
+                else:
+                    raise ValueError(f"Директория с аудио файлами не найдена: {base_dir}")
         
         # Проверяем существование директорий
-        if not self.audio_dir.exists():
-            raise ValueError(f"Директория с аудио файлами не найдена: {self.audio_dir}")
+        for audio_dir_path in audio_dirs:
+            if not audio_dir_path.exists():
+                raise ValueError(f"Директория с аудио файлами не найдена: {audio_dir_path}")
+        
         if not self.original_dir.exists():
             raise ValueError(f"Директория с оригинальными файлами не найдена: {self.original_dir}")
         
-        # Находим все аудио файлы
-        self.audio_files = list(self.audio_dir.rglob("*.wav"))
-        print(f"Найдено {len(self.audio_files)} аудио файлов в {self.audio_dir}")
+        # Находим все аудио файлы во всех указанных директориях
+        self.audio_files = []
+        for audio_dir_path in audio_dirs:
+            files = list(audio_dir_path.rglob("*.wav"))
+            self.audio_files.extend(files)
+            print(f"Найдено {len(files)} аудио файлов в {audio_dir_path}")
+        
+        print(f"Всего найдено {len(self.audio_files)} аудио файлов")
         
         if len(self.audio_files) == 0:
             print(f"ВНИМАНИЕ: Не найдено ни одного .wav файла в {self.audio_dir}")
@@ -93,6 +137,26 @@ class STOIDataset(Dataset):
         
         # Если target_stoi указан, используем его вместо вычисления
         self.target_stoi = target_stoi
+        
+        # Формируем индексы чанков
+        self.chunk_index = []
+        for processed_file, original_file in self.valid_files:
+            num_chunks = self._estimate_num_chunks(processed_file)
+            if self.single_chunk_per_audio:
+                self.chunk_index.append((processed_file, original_file, 0))
+            else:
+                for chunk_idx in range(num_chunks):
+                    self.chunk_index.append((processed_file, original_file, chunk_idx))
+        print(f"Всего чанков: {len(self.chunk_index)} (длина чанка {self.chunk_length_seconds:.2f} сек)")
+
+        # Кэширование STOI для ускорения
+        self.cache_stoi = cache_stoi
+        if cache_file is None:
+            cache_file = self.original_dir.parent / '.stoi_cache.pkl'
+        self.cache_file = Path(cache_file)
+        
+        # Загружаем или создаем кэш STOI
+        self.stoi_cache = self._load_or_create_stoi_cache()
         
     def _find_original_file(self, processed_file):
         """Находит оригинальный файл по имени обработанного файла"""
@@ -173,93 +237,155 @@ class STOIDataset(Dataset):
         
         return params
     
-    def _load_audio(self, filepath):
-        """Загружает аудио файл"""
+    def _estimate_num_chunks(self, filepath):
+        """Оценивает количество чанков по длительности файла"""
         try:
-            waveform, sr = torchaudio.load(str(filepath))
+            info = None
+            if hasattr(torchaudio, "info"):
+                info = torchaudio.info(str(filepath))
+            elif hasattr(torchaudio, "backend") and hasattr(torchaudio.backend, "sox_io_backend"):
+                info = torchaudio.backend.sox_io_backend.info(str(filepath))
+
+            if info is not None and info.sample_rate > 0:
+                duration_sec = info.num_frames / info.sample_rate
+            else:
+                waveform, sr = torchaudio.load(str(filepath), normalize=True)
+                duration_sec = waveform.shape[1] / sr if sr > 0 else 0.0
+
+            if duration_sec <= 0:
+                return 1
+            return max(1, math.ceil(duration_sec / self.chunk_length_seconds))
+        except Exception as e:
+            print(f"Не удалось получить длительность {filepath}: {e}")
+            return 1
+
+    def _load_audio_chunk(self, filepath, chunk_idx):
+        """Загружает аудио чанк фиксированной длины"""
+        try:
+            # Используем torchaudio для быстрой загрузки
+            waveform, sr = torchaudio.load(str(filepath), normalize=True)
+            
             # Конвертируем в моно
             if waveform.shape[0] > 1:
                 waveform = torch.mean(waveform, dim=0, keepdim=True)
             
             # Ресемплируем если нужно
             if sr != self.sample_rate:
-                resampler = torchaudio.transforms.Resample(sr, self.sample_rate)
-                waveform = resampler(waveform)
+                # Создаем ресемплер только если нужно и если его еще нет или частота изменилась
+                if (not hasattr(self, '_resampler') or 
+                    self._resampler is None or 
+                    not hasattr(self._resampler, 'orig_freq') or 
+                    self._resampler.orig_freq != sr):
+                    self._resampler = torchaudio.transforms.Resample(sr, self.sample_rate)
+                waveform = self._resampler(waveform)
             
-            # Обрезаем или дополняем до нужной длины
-            if waveform.shape[1] > self.max_length:
-                waveform = waveform[:, :self.max_length]
-            elif waveform.shape[1] < self.max_length:
-                padding = self.max_length - waveform.shape[1]
-                waveform = torch.nn.functional.pad(waveform, (0, padding))
+            waveform = waveform.squeeze(0)  # (seq_len,)
+
+            # Вырезаем нужный чанк
+            start = chunk_idx * self.chunk_length
+            end = start + self.chunk_length
+            if start >= waveform.shape[0]:
+                chunk = torch.zeros(self.chunk_length)
+            else:
+                chunk = waveform[start:end]
             
-            return waveform.squeeze(0)  # Убираем dimension каналов
+            # Дополняем до фиксированной длины
+            if chunk.shape[0] < self.chunk_length:
+                padding = self.chunk_length - chunk.shape[0]
+                chunk = torch.nn.functional.pad(chunk, (0, padding))
+            
+            return chunk
         except Exception as e:
             print(f"Ошибка загрузки {filepath}: {e}")
-            return torch.zeros(self.max_length)
+            return torch.zeros(self.chunk_length)
     
-    def _calculate_stoi(self, processed_file, original_file):
-        """Вычисляет STOI между обработанным и оригинальным файлом"""
+    def _load_or_create_stoi_cache(self):
+        """Загружает существующий кэш STOI или создает новый"""
+        cache = {}
+        
+        # Пробуем загрузить существующий кэш
+        if self.cache_file.exists() and self.cache_stoi:
+            try:
+                with open(self.cache_file, 'rb') as f:
+                    cache = pickle.load(f)
+                print(f"Загружен кэш STOI из {self.cache_file} ({len(cache)} записей)")
+            except Exception as e:
+                print(f"Не удалось загрузить кэш: {e}, создаем новый")
+        
+        # Вычисляем STOI для файлов, которых нет в кэше
+        if self.cache_stoi and len(self.chunk_index) > 0:
+            missing_count = 0
+            for processed_file, original_file, chunk_idx in tqdm(self.chunk_index, desc="Вычисление STOI"):
+                cache_key = f"{processed_file}|chunk={chunk_idx}"
+                if cache_key not in cache:
+                    stoi_value = self._calculate_stoi_impl(processed_file, original_file, chunk_idx)
+                    cache[cache_key] = stoi_value
+                    missing_count += 1
+            
+            if missing_count > 0:
+                print(f"Вычислено {missing_count} новых значений STOI")
+                # Сохраняем обновленный кэш
+                try:
+                    with open(self.cache_file, 'wb') as f:
+                        pickle.dump(cache, f)
+                    print(f"Кэш STOI сохранен в {self.cache_file}")
+                except Exception as e:
+                    print(f"Не удалось сохранить кэш: {e}")
+        
+        return cache
+    
+    def _calculate_stoi_impl(self, processed_file, original_file, chunk_idx):
+        """Внутренняя реализация вычисления STOI"""
         if self.target_stoi is not None:
             return self.target_stoi
         
         try:
             from pystoi import stoi
-            
-            # Загружаем оба файла
-            processed, sr_proc = librosa.load(str(processed_file), sr=None, mono=True)
-            original, sr_orig = librosa.load(str(original_file), sr=None, mono=True)
-            
-            # Убеждаемся, что частота дискретизации одинакова
-            if sr_proc != sr_orig:
-                target_sr = min(sr_proc, sr_orig)
-                if sr_proc != target_sr:
-                    processed = librosa.resample(processed, orig_sr=sr_proc, target_sr=target_sr)
-                if sr_orig != target_sr:
-                    original = librosa.resample(original, orig_sr=sr_orig, target_sr=target_sr)
-                sr = target_sr
-            else:
-                sr = sr_proc
-            
-            # Обрезаем до минимальной длины
-            min_len = min(len(processed), len(original))
-            processed = processed[:min_len]
-            original = original[:min_len]
-            
-            # Вычисляем STOI
-            stoi_score = stoi(original, processed, sr, extended=False)
+
+            processed_chunk = self._load_audio_chunk(processed_file, chunk_idx)
+            original_chunk = self._load_audio_chunk(original_file, chunk_idx)
+
+            processed_np = processed_chunk.cpu().numpy()
+            original_np = original_chunk.cpu().numpy()
+
+            # Вычисляем STOI на чанке
+            stoi_score = stoi(original_np, processed_np, self.sample_rate, extended=False)
             return float(stoi_score)
         except Exception as e:
             print(f"Ошибка вычисления STOI для {processed_file}: {e}")
             return 0.5  # Значение по умолчанию
     
+    def _calculate_stoi(self, processed_file, original_file, chunk_idx):
+        """Вычисляет STOI между обработанным и оригинальным файлом (с кэшированием)"""
+        if self.target_stoi is not None:
+            return self.target_stoi
+        
+        # Используем кэш, если доступен
+        if self.cache_stoi:
+            cache_key = f"{processed_file}|chunk={chunk_idx}"
+            if cache_key in self.stoi_cache:
+                return self.stoi_cache[cache_key]
+        
+        # Если нет в кэше, вычисляем
+        return self._calculate_stoi_impl(processed_file, original_file, chunk_idx)
+    
     def __len__(self):
-        return len(self.valid_files)
+        return len(self.chunk_index)
     
     def __getitem__(self, idx):
-        processed_file, original_file = self.valid_files[idx]
+        processed_file, original_file, chunk_idx = self.chunk_index[idx]
         filename = processed_file.name
         
         # Загружаем аудио
-        waveform = self._load_audio(processed_file)
-        
-        # Парсим параметры из имени файла
-        params = self._parse_filename(filename)
+        waveform = self._load_audio_chunk(processed_file, chunk_idx)
         
         # Вычисляем STOI
-        stoi_score = self._calculate_stoi(processed_file, original_file)
-        
-        # Создаем вектор признаков из параметров
-        feature_vector = torch.tensor([
-            params['snr'] if params['snr'] is not None else 0.0,
-            params['rt60'] if params['rt60'] is not None else 0.0,
-            params['wet'] if params['wet'] is not None else 0.0
-        ], dtype=torch.float32)
+        stoi_score = self._calculate_stoi(processed_file, original_file, chunk_idx)
         
         return {
             'waveform': waveform,
-            'features': feature_vector,
             'stoi': torch.tensor(stoi_score, dtype=torch.float32),
-            'filename': filename
+            'filename': filename,
+            'chunk_idx': chunk_idx
         }
 

@@ -2,6 +2,7 @@
 Скрипт для тренировки модели предсказания STOI
 """
 import os
+import warnings
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -15,6 +16,9 @@ import numpy as np
 from dataset import STOIDataset
 from model import STOIPredictor
 
+# Подавляем предупреждения о градиентах для замороженных моделей
+warnings.filterwarnings("ignore", message=".*None of the inputs have requires_grad=True.*")
+
 
 def train_epoch(model, dataloader, criterion, optimizer, device, epoch):
     """Одна эпоха тренировки"""
@@ -26,22 +30,25 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch):
     pbar = tqdm(dataloader, desc=f'Epoch {epoch} [Train]')
     for batch in pbar:
         waveform = batch['waveform'].to(device)
-        features = batch['features'].to(device)
         stoi_true = batch['stoi'].to(device)
         
         # Forward pass
         optimizer.zero_grad()
-        stoi_pred = model(waveform, features)
+        stoi_pred = model(waveform)
+        
+        # Убеждаемся, что размеры совпадают
+        stoi_pred_flat = stoi_pred.view(-1)  # (batch_size,)
+        stoi_true_flat = stoi_true.view(-1)  # (batch_size,)
         
         # Вычисляем loss
-        loss = criterion(stoi_pred.squeeze(), stoi_true)
+        loss = criterion(stoi_pred_flat, stoi_true_flat)
         
         # Backward pass
         loss.backward()
         optimizer.step()
         
         # Метрики
-        mae = torch.abs(stoi_pred.squeeze() - stoi_true).mean().item()
+        mae = torch.abs(stoi_pred_flat - stoi_true_flat).mean().item()
         total_loss += loss.item()
         total_mae += mae
         num_batches += 1
@@ -71,24 +78,39 @@ def validate(model, dataloader, criterion, device):
         pbar = tqdm(dataloader, desc='[Val]')
         for batch in pbar:
             waveform = batch['waveform'].to(device)
-            features = batch['features'].to(device)
             stoi_true = batch['stoi'].to(device)
             
             # Forward pass
-            stoi_pred = model(waveform, features)
+            stoi_pred = model(waveform)
+            
+            # Убеждаемся, что размеры совпадают
+            stoi_pred_flat = stoi_pred.view(-1)  # (batch_size,)
+            stoi_true_flat = stoi_true.view(-1)  # (batch_size,)
             
             # Вычисляем loss
-            loss = criterion(stoi_pred.squeeze(), stoi_true)
+            loss = criterion(stoi_pred_flat, stoi_true_flat)
             
             # Метрики
-            mae = torch.abs(stoi_pred.squeeze() - stoi_true).mean().item()
+            mae = torch.abs(stoi_pred_flat - stoi_true_flat).mean().item()
             total_loss += loss.item()
             total_mae += mae
             num_batches += 1
             
             # Сохраняем предсказания для анализа
-            all_preds.extend(stoi_pred.squeeze().cpu().numpy())
-            all_targets.extend(stoi_true.cpu().numpy())
+            # Используем numpy() напрямую, чтобы избежать проблем с 0-d массивами
+            preds_np = stoi_pred_flat.cpu().numpy()
+            targets_np = stoi_true_flat.cpu().numpy()
+            
+            # Преобразуем в список, если это скаляр
+            if preds_np.ndim == 0:
+                all_preds.append(float(preds_np))
+            else:
+                all_preds.extend(preds_np.tolist())
+            
+            if targets_np.ndim == 0:
+                all_targets.append(float(targets_np))
+            else:
+                all_targets.extend(targets_np.tolist())
             
             pbar.set_postfix({
                 'loss': f'{loss.item():.4f}',
@@ -107,27 +129,31 @@ def validate(model, dataloader, criterion, device):
 def main():
     parser = argparse.ArgumentParser(description='Тренировка модели предсказания STOI')
     parser.add_argument('--audio_dir', type=str, 
-                       default='/home/danya/datasets/CMU-MOSEI/Audio/noise_reverb/',
-                       help='Директория с обработанными аудио файлами')
+                       default='/home/danya/datasets/CMU-MOSEI/Audio/',
+                       help='Базовая директория с обработанными аудио файлами (будет искать в поддиректориях noise, reverb, noise_reverb)')
     parser.add_argument('--original_dir', type=str,
                        default='/home/danya/datasets/CMU-MOSEI/Audio/WAV_16000/',
                        help='Директория с оригинальными аудио файлами')
     parser.add_argument('--output_dir', type=str, default='./checkpoints',
                        help='Директория для сохранения чекпоинтов')
-    parser.add_argument('--batch_size', type=int, default=8,
+    parser.add_argument('--batch_size', type=int, default=32,
                        help='Размер батча')
     parser.add_argument('--epochs', type=int, default=10,
                        help='Количество эпох')
     parser.add_argument('--lr', type=float, default=1e-4,
                        help='Learning rate')
     parser.add_argument('--wav2vec_model', type=str, default='facebook/wav2vec2-base',
-                       help='Название модели wav2vec2')
-    parser.add_argument('--hidden_dim', type=int, default=256,
+                       help='Название модели wav2vec2 (можно использовать wav2vec2-large для лучших результатов, но требуется больше памяти)')
+    parser.add_argument('--hidden_dim', type=int, default=512,
                        help='Размерность скрытых слоев')
-    parser.add_argument('--num_layers', type=int, default=3,
+    parser.add_argument('--num_layers', type=int, default=5,
                        help='Количество полносвязных слоев')
-    parser.add_argument('--dropout', type=float, default=0.1,
+    parser.add_argument('--dropout', type=float, default=0.2,
                        help='Dropout rate')
+    parser.add_argument('--use_residual', action='store_true', default=True,
+                       help='Использовать residual connections')
+    parser.add_argument('--freeze_wav2vec', action='store_true', default=True,
+                       help='Замораживать веса wav2vec (False = fine-tuning, требует больше памяти)')
     parser.add_argument('--train_split', type=float, default=0.8,
                        help='Доля данных для тренировки')
     parser.add_argument('--sample_rate', type=int, default=16000,
@@ -136,6 +162,8 @@ def main():
                        help='Максимальная длина аудио в секундах')
     parser.add_argument('--max_samples', type=int, default=None,
                        help='Максимальное количество образцов для тренировки (None = использовать все)')
+    parser.add_argument('--single_chunk_per_audio', action='store_true', default=False,
+                       help='Брать только один чанк на аудио (для быстрого тестового обучения)')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                        help='Устройство для тренировки')
     
@@ -146,12 +174,16 @@ def main():
     
     # Создаем dataset
     print("Загрузка датасета...")
+    print(f"Базовая директория: {args.audio_dir}")
+    print("Ищем файлы в поддиректориях: noise, reverb, noise_reverb, extreme_stoi")
     dataset = STOIDataset(
         audio_dir=args.audio_dir,
         original_dir=args.original_dir,
         sample_rate=args.sample_rate,
         max_length_seconds=args.max_length,
-        use_wav2vec=True
+        use_wav2vec=True,
+        subdirs=['noise', 'reverb', 'noise_reverb', 'extreme_stoi'],  # Ищем файлы в этих поддиректориях
+        single_chunk_per_audio=args.single_chunk_per_audio
     )
     
     # Проверяем, что датасет не пустой
@@ -193,16 +225,18 @@ def main():
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=4,
-        pin_memory=True if args.device == 'cuda' else False
+        num_workers=8,
+        pin_memory=True if args.device == 'cuda' else False,
+        persistent_workers=True if args.device == 'cuda' else False
     )
     
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=4,
-        pin_memory=True if args.device == 'cuda' else False
+        num_workers=8,
+        pin_memory=True if args.device == 'cuda' else False,
+        persistent_workers=True if args.device == 'cuda' else False
     )
     
     # Создаем модель
@@ -213,7 +247,9 @@ def main():
         num_layers=args.num_layers,
         dropout=args.dropout,
         use_audio_features=True,
-        use_metadata_features=True
+        use_metadata_features=False,
+        use_residual=args.use_residual,
+        freeze_wav2vec=args.freeze_wav2vec
     ).to(args.device)
     
     print(f"Модель создана. Параметров: {sum(p.numel() for p in model.parameters()):,}")
@@ -222,7 +258,7 @@ def main():
     criterion = nn.MSELoss()
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=3, verbose=True
+        optimizer, mode='min', factor=0.5, patience=3
     )
     
     # TensorBoard

@@ -11,8 +11,8 @@ import shutil
 
 # Конфигурация
 class Config:
-    INPUT_DIR = "/home/danya/develop/datasets/CMU-MOSEI/Audio/WAV_16000/"
-    OUTPUT_DIR = "/home/danya/develop/datasets/CMU-MOSEI/Audio/balanced_stoi_dataset/"
+    INPUT_DIR = "/home/danya/datasets/CMU-MOSEI/Audio/WAV_16000/"
+    OUTPUT_DIR = "/home/danya/datasets/CMU-MOSEI/Audio/balanced_stoi_dataset/"
     VAD_PARAMS = {
         "top_db": 20,
         "frame_length": 2048,
