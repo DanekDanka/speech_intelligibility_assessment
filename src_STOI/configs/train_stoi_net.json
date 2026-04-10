@@ -1,0 +1,75 @@
+{
+  "seed": 42,
+  "device": "cuda",
+  "data": {
+    "audio_base_dir": "/home/danya/datasets/CMU-MOSEI/Audio",
+    "subdirs": ["noise", "reverb", "noise_reverb", "extreme_stoi"],
+    "original_dir": "/home/danya/datasets/CMU-MOSEI/Audio/WAV_16000",
+    "chunk_duration_sec": 5.0,
+    "sample_rate": 16000,
+    "single_chunk_per_file": false,
+    "cache_stoi_path": "./stoi_label_cache.pkl",
+    "max_items": null,
+    "stoi_cache_num_workers": null,
+    "train_on_all_data": true,
+    "val_holdout_fraction": 0.01,
+    "train_ratio": 0.8,
+    "val_ratio": 0.1,
+    "test_ratio": 0.1,
+    "index_fraction": 1.0,
+    "shuffle_chunks": true,
+    "train_data_fraction": 1.0,
+    "stoi_rich_cache_path": "./stoi_train_partly_rich_cache.pkl",
+    "stoi_import_legacy_cache_paths": ["./stoi_label_cache.pkl"]
+  },
+  "voxceleb": {
+    "enabled": true,
+    "mirror_root": "/home/danya/datasets/voxceleb",
+    "augmented_root": "/home/danya/datasets/voxceleb_augmented",
+    "train_subdirs": ["train/noise", "train/reverb", "train/noise_reverb"],
+    "test_subdirs": ["test/noise", "test/reverb", "test/noise_reverb"],
+    "train_ratio": 0.9,
+    "val_ratio": 0.1,
+    "max_items": null,
+    "max_items_test": null
+  },
+  "stoi_target": {
+    "extended": false,
+    "resample_mode": "torchaudio",
+    "compute_device": "cuda",
+    "apply_silence_removal": false
+  },
+  "model": {
+    "name": "stoi_net_predictor",
+    "kwargs": {
+      "sample_rate": 16000,
+      "n_fft": 512,
+      "hop_length": 256,
+      "win_length": 512,
+      "lstm_hidden": 128,
+      "lstm_layers": 1,
+      "fc_dim": 128,
+      "dropout": 0.1,
+      "use_log_mag": true
+    }
+  },
+  "training": {
+    "epochs": 10,
+    "batch_size": 12,
+    "num_workers": 4,
+    "optimizer": {
+      "type": "adam",
+      "lr": 0.0001,
+      "weight_decay": 0.0
+    },
+    "loss": "torchaudio_stoi",
+    "amp": true,
+    "grad_clip": 1.0,
+    "log_dir": null
+  },
+  "output_dir": "./checkpoints_src_stoi_net",
+  "export_test_predictions": {
+    "enabled": false,
+    "path": "./test_predictions_stoi_net.json"
+  }
+}
