@@ -1,9 +1,63 @@
+# Python
 .venv/
+venv/
+env/
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Модели и логи обучения (тяжёлые)
+*.pt
+*.pth
+*.ckpt
+*.onnx
+checkpoints/
+checkpoints_*/
+**/logs/
+**/logs_*/
+events.out.tfevents.*
+
+# Кэши меток STOI и прочие большие pickle
+*.pkl
+
+# Сгенерированные отчёты и картинки экспериментов
 images/
 eval_results/
-final_model.pth
 results/
+comparison_results/
+test_results/
+vew_some_wav/continuous_speech_output/
+final_model.pth
+
+# Локальные предсказания / экспорт
+test_predictions*.json
+
+# Секреты и локальные пути
+.env
+.env.*
+
+# LaTeX (thesis)
 thesis/main-blx.bib
 thesis/main.aux
 thesis/main.bbl
