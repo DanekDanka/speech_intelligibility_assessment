@@ -17,31 +17,15 @@
 pip install -r requirements.txt
 ```
 
-2. Нужен чекпоинт в формате `train.py` / `test_model.py` (ключи `model` и `state_dict`). По умолчанию:
-   - `checkpoints_src_stoi_net/best.pt` (от корня репозитория)
-
-   Переменные окружения:
-```bash
-export MODEL_CHECKPOINT=/path/to/best.pt
-export STOI_NET_CONFIG=/path/to/train_stoi_net.json   # опционально
-```
-
 ## Запуск
 
-### Вариант 1: Использование скрипта (рекомендуется)
+### Использование скрипта (рекомендуется)
 ```bash
-./run.sh
+./run.sh hf://DanekDanka/NI-STOI/best.pt
 ```
-
-### Вариант 2: Прямой запуск
-```bash
-python app.py
+или
 ```
-
-### Вариант 3: Свой чекпоинт
-```bash
-export MODEL_CHECKPOINT=checkpoints_src_stoi_net/best.pt
-python app.py
+./run.sh {path_to_model}
 ```
 
 После запуска откройте браузер и перейдите по адресу, который будет показан в консоли (обычно `http://localhost:7860`).
