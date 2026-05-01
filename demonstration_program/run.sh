@@ -2,23 +2,23 @@
 
 # Скрипт для запуска демонстрационной программы
 
-# Проверяем наличие виртуального окружения
-if [ -d "../.venv" ]; then
-    echo "Активация виртуального окружения..."
-    source ../.venv/bin/activate
+# Проверяем, что путь к модели передан аргументом
+if [ -z "$1" ]; then
+    echo "Ошибка: не указан путь к модели."
+    echo "Использование: $0 <путь_к_модели>"
+    echo "Пример: $0 checkpoints_src_stoi_net/best.pt"
+    exit 1
 fi
 
-# Чекпоинт STOI-Net (по умолчанию — как в train_stoi_net.json → checkpoints_src_stoi_net)
-export MODEL_CHECKPOINT="${MODEL_CHECKPOINT:-checkpoints_src_stoi_net/best.pt}"
+export MODEL_CHECKPOINT="$1"
 
 # Проверяем наличие модели
 if [ ! -f "$MODEL_CHECKPOINT" ]; then
     echo "Внимание: Модель не найдена по пути: $MODEL_CHECKPOINT"
-    echo "Установите переменную окружения MODEL_CHECKPOINT или поместите модель в указанный путь."
+    echo "Передайте корректный путь к модели первым аргументом."
     echo ""
     echo "Пример:"
-    echo "  export MODEL_CHECKPOINT=checkpoints_src_stoi_net/best.pt"
-    echo "  python app.py"
+    echo "  $0 checkpoints_src_stoi_net/best.pt"
     echo ""
     read -p "Продолжить все равно? (y/n) " -n 1 -r
     echo

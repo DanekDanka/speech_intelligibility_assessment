@@ -31,7 +31,6 @@ from src_STOI.config_utils import load_merged_config
 from src_STOI.model import build_model
 
 _DEFAULT_CONFIG_PATH = _REPO_ROOT / "src_STOI" / "configs" / "train_stoi_net.json"
-_DEFAULT_CHECKPOINT_PATH = _REPO_ROOT / "checkpoints_src_stoi_net" / "best.pt"
 
 
 def _resolve_under_repo(path: Path) -> Path:
