@@ -5,3 +5,4 @@ librosa>=0.10.0
 matplotlib>=3.5.0
 gradio>=4.0.0
 scipy>=1.9.0
+huggingface_hub>=0.23.0
