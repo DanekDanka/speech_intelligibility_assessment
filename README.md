@@ -15,8 +15,7 @@ The **`src_STOI`** track learns to predict **STOI-like scores** from short wav c
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -r src_STOI/requirements.txt
-python src_STOI/train.py --config src_STOI/configs/train_stoi_net.json
+pip install -r demonstration_program/requirements.txt
+cd demonstration_program
+./run.sh hf://DanekDanka/NI-STOI/best.pt
 ```
-
-Dataset paths live in the JSON configs. Checkpoints, TensorBoard logs, and STOI label caches are not meant to be committed (see `.gitignore`).
