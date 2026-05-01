@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import math
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, TextIO, Tuple
 
 import numpy as np
 import torch
@@ -26,6 +28,78 @@ from src_STOI.preprocessing import (
     TorchaudioBackedStoiTargetComputer,
     TorchaudioResampleMonoChunkPreprocessor,
 )
+
+
+def _json_safe(obj: Any) -> Any:
+    """Приводит значение к виду, пригодному для json.dump (без Path и пр.)."""
+    if isinstance(obj, Path):
+        return obj.as_posix()
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(x) for x in obj]
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    return str(obj)
+
+
+class EpochMetricsCSVLogger:
+    """Построчная запись метрик эпох в CSV для графиков и офлайн-анализа."""
+
+    FIELDNAMES = (
+        "epoch",
+        "train_loss",
+        "train_mae",
+        "val_loss",
+        "val_mae",
+        "val_corr",
+        "lr",
+        "best_score",
+        "new_best",
+    )
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
+        self._fp: TextIO = open(path, "w", newline="", encoding="utf-8")
+        self._writer = csv.DictWriter(self._fp, fieldnames=self.FIELDNAMES, extrasaction="ignore")
+        self._writer.writeheader()
+        self._fp.flush()
+
+    def log_epoch(
+        self,
+        *,
+        epoch: int,
+        train_loss: float,
+        train_mae: float,
+        val_loss: Optional[float],
+        val_mae: Optional[float],
+        val_corr: Optional[float],
+        lr: float,
+        best_score: float,
+        new_best: bool,
+    ) -> None:
+        row: Dict[str, Any] = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "train_mae": train_mae,
+            "lr": lr,
+            "best_score": best_score if math.isfinite(best_score) else "",
+            "new_best": int(new_best),
+        }
+        if val_loss is None:
+            row["val_loss"] = ""
+            row["val_mae"] = ""
+            row["val_corr"] = ""
+        else:
+            row["val_loss"] = val_loss
+            row["val_mae"] = val_mae
+            row["val_corr"] = val_corr
+        self._writer.writerow(row)
+        self._fp.flush()
+
+    def close(self) -> None:
+        self._fp.close()
 
 
 def collate_stoi_batch(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -578,10 +652,19 @@ def main() -> None:
     best_path = out_dir / "best.pt"
     last_path = out_dir / "last.pt"
 
+    resolved_cfg_path = out_dir / "training_config_resolved.json"
+    with open(resolved_cfg_path, "w", encoding="utf-8") as f:
+        json.dump(_json_safe(cfg), f, indent=2, ensure_ascii=False)
+    print(f"  конфиг прогона (воспроизводимость): {resolved_cfg_path}")
+
+    metrics_csv_rel = t_cfg.get("metrics_csv_path")
+    metrics_path = Path(metrics_csv_rel).expanduser() if metrics_csv_rel else (out_dir / "train_metrics.csv")
+
     log_dir = t_cfg.get("log_dir")
     writer = SummaryWriter(log_dir) if log_dir else None
     best_note = "лучший val" if val_loader is not None else "лучший train loss (val выключен)"
     print(f"  чекпоинты: {best_path} ({best_note}), {last_path} (последний)")
+    print(f"  метрики по эпохам (CSV, для графиков): {metrics_path}")
     if log_dir:
         print(f"  TensorBoard: {log_dir}")
     else:
@@ -593,56 +676,93 @@ def main() -> None:
 
     best_val = float("inf")
     best_epoch = 0
+    metrics_logger = EpochMetricsCSVLogger(metrics_path)
     epoch_pbar = tqdm(
         range(1, epochs + 1),
         desc="Эпохи",
         unit="epoch",
         leave=True,
     )
-    for epoch in epoch_pbar:
-        tr_loss, tr_mae = train_one_epoch(model, train_loader, criterion, optimizer, device, scaler, grad_clip)
-        if val_loader is not None:
-            va_loss, va_mae, va_r = evaluate(model, val_loader, criterion, device)
-            score_for_best = va_loss
-            tqdm.write(
-                f"Эпоха {epoch}/{epochs} | train loss={tr_loss:.4f} MAE={tr_mae:.4f} | "
-                f"val loss={va_loss:.4f} MAE={va_mae:.4f} r={va_r:.4f}"
-            )
-        else:
-            va_loss = va_mae = va_r = float("nan")
-            score_for_best = tr_loss
-            tqdm.write(
-                f"Эпоха {epoch}/{epochs} | train loss={tr_loss:.4f} MAE={tr_mae:.4f} | val пропущен (все данные в train)"
-            )
-        if writer:
-            writer.add_scalar("loss/train", tr_loss, epoch)
-            writer.add_scalar("mae/train", tr_mae, epoch)
+    try:
+        for epoch in epoch_pbar:
+            tr_loss, tr_mae = train_one_epoch(model, train_loader, criterion, optimizer, device, scaler, grad_clip)
             if val_loader is not None:
-                writer.add_scalar("loss/val", va_loss, epoch)
-                writer.add_scalar("mae/val", va_mae, epoch)
-                writer.add_scalar("corr/val", va_r, epoch)
-        if score_for_best < best_val:
-            best_val = score_for_best
-            best_epoch = epoch
-            torch.save({"model": m_cfg, "epoch": epoch, "state_dict": model.state_dict()}, best_path)
-            tag = "val_loss" if val_loader is not None else "train_loss"
-            tqdm.write(f"  → новый лучший {tag}={best_val:.4f}, сохранён {best_path.name}")
-        torch.save({"model": m_cfg, "epoch": epoch, "state_dict": model.state_dict()}, last_path)
-        if val_loader is not None:
-            epoch_pbar.set_postfix(
-                tr_loss=f"{tr_loss:.4f}",
-                val_loss=f"{va_loss:.4f}",
-                val_mae=f"{va_mae:.3f}",
-                best_val=f"{best_val:.4f}" if best_val < float("inf") else "—",
+                va_loss, va_mae, va_r = evaluate(model, val_loader, criterion, device)
+                score_for_best = va_loss
+                tqdm.write(
+                    f"Эпоха {epoch}/{epochs} | train loss={tr_loss:.4f} MAE={tr_mae:.4f} | "
+                    f"val loss={va_loss:.4f} MAE={va_mae:.4f} r={va_r:.4f}"
+                )
+            else:
+                va_loss = va_mae = va_r = float("nan")
+                score_for_best = tr_loss
+                tqdm.write(
+                    f"Эпоха {epoch}/{epochs} | train loss={tr_loss:.4f} MAE={tr_mae:.4f} | "
+                    f"val пропущен (все данные в train)"
+                )
+            if writer:
+                writer.add_scalar("loss/train", tr_loss, epoch)
+                writer.add_scalar("mae/train", tr_mae, epoch)
+                if val_loader is not None:
+                    writer.add_scalar("loss/val", va_loss, epoch)
+                    writer.add_scalar("mae/val", va_mae, epoch)
+                    writer.add_scalar("corr/val", va_r, epoch)
+            improved = score_for_best < best_val
+            if improved:
+                best_val = score_for_best
+                best_epoch = epoch
+                torch.save({"model": m_cfg, "epoch": epoch, "state_dict": model.state_dict()}, best_path)
+                tag = "val_loss" if val_loader is not None else "train_loss"
+                tqdm.write(f"  → новый лучший {tag}={best_val:.4f}, сохранён {best_path.name}")
+            torch.save({"model": m_cfg, "epoch": epoch, "state_dict": model.state_dict()}, last_path)
+            lr_now = float(optimizer.param_groups[0]["lr"])
+            metrics_logger.log_epoch(
+                epoch=epoch,
+                train_loss=tr_loss,
+                train_mae=tr_mae,
+                val_loss=va_loss if val_loader is not None else None,
+                val_mae=va_mae if val_loader is not None else None,
+                val_corr=va_r if val_loader is not None else None,
+                lr=lr_now,
+                best_score=best_val,
+                new_best=improved,
             )
-        else:
-            epoch_pbar.set_postfix(
-                tr_loss=f"{tr_loss:.4f}",
-                best_train=f"{best_val:.4f}" if best_val < float("inf") else "—",
-            )
+            if val_loader is not None:
+                epoch_pbar.set_postfix(
+                    tr_loss=f"{tr_loss:.4f}",
+                    val_loss=f"{va_loss:.4f}",
+                    val_mae=f"{va_mae:.3f}",
+                    best_val=f"{best_val:.4f}" if best_val < float("inf") else "—",
+                )
+            else:
+                epoch_pbar.set_postfix(
+                    tr_loss=f"{tr_loss:.4f}",
+                    best_train=f"{best_val:.4f}" if best_val < float("inf") else "—",
+                )
+    finally:
+        metrics_logger.close()
 
     if writer:
         writer.close()
+
+    summary_path = out_dir / "training_summary.json"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "best_epoch": best_epoch,
+                "best_score": best_val,
+                "epochs": epochs,
+                "metrics_csv": metrics_path.as_posix(),
+                "resolved_config": resolved_cfg_path.as_posix(),
+                "tensorboard_log_dir": log_dir if log_dir else None,
+                "finished_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "score_is_val_loss": val_loader is not None,
+            },
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
+    print(f"  сводка прогона: {summary_path}")
 
     print("=" * 72)
     print("Обучение завершено")

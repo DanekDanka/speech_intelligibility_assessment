@@ -49,6 +49,7 @@ comparison_results/
 test_results/
 vew_some_wav/continuous_speech_output/
 final_model.pth
+test_model_plots/
 
 # Локальные предсказания / экспорт
 test_predictions*.json

@@ -1,6 +1,6 @@
 # Демонстрационная программа для модели предсказания STOI
 
-Веб-приложение на Gradio для демонстрации работы CNN модели предсказания STOI (Speech Transmission Objective Intelligibility).
+Веб-приложение на Gradio для демонстрации **STOI-Net** (предсказание STOI), обученной по `src_STOI/configs/train_stoi_net.json`.
 
 ## Описание
 
@@ -17,12 +17,13 @@
 pip install -r requirements.txt
 ```
 
-2. Убедитесь, что у вас есть обученная модель. По умолчанию программа ищет модель по пути:
-   - `../checkpoints_cnn_final/best_cnn_final.pt`
+2. Нужен чекпоинт в формате `train.py` / `test_model.py` (ключи `model` и `state_dict`). По умолчанию:
+   - `checkpoints_src_stoi_net/best.pt` (от корня репозитория)
 
-   Или вы можете указать свой путь через переменную окружения:
+   Переменные окружения:
 ```bash
-export MODEL_CHECKPOINT=/path/to/your/model.pt
+export MODEL_CHECKPOINT=/path/to/best.pt
+export STOI_NET_CONFIG=/path/to/train_stoi_net.json   # опционально
 ```
 
 ## Запуск
@@ -37,9 +38,9 @@ export MODEL_CHECKPOINT=/path/to/your/model.pt
 python app.py
 ```
 
-### Вариант 3: С указанием пути к модели
+### Вариант 3: Свой чекпоинт
 ```bash
-export MODEL_CHECKPOINT=../checkpoints_cnn_hyperopt_v2/best_cnn_hyperopt.pt
+export MODEL_CHECKPOINT=checkpoints_src_stoi_net/best.pt
 python app.py
 ```
 

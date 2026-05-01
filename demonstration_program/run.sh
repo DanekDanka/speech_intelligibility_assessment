@@ -8,8 +8,8 @@ if [ -d "../.venv" ]; then
     source ../.venv/bin/activate
 fi
 
-# Устанавливаем путь к модели (можно изменить)
-export MODEL_CHECKPOINT="${MODEL_CHECKPOINT:-../checkpoints_cnn_final/best_cnn_final.pt}"
+# Чекпоинт STOI-Net (по умолчанию — как в train_stoi_net.json → checkpoints_src_stoi_net)
+export MODEL_CHECKPOINT="${MODEL_CHECKPOINT:-checkpoints_src_stoi_net/best.pt}"
 
 # Проверяем наличие модели
 if [ ! -f "$MODEL_CHECKPOINT" ]; then
@@ -17,7 +17,7 @@ if [ ! -f "$MODEL_CHECKPOINT" ]; then
     echo "Установите переменную окружения MODEL_CHECKPOINT или поместите модель в указанный путь."
     echo ""
     echo "Пример:"
-    echo "  export MODEL_CHECKPOINT=../checkpoints_cnn_hyperopt_v2/best_cnn_hyperopt.pt"
+    echo "  export MODEL_CHECKPOINT=checkpoints_src_stoi_net/best.pt"
     echo "  python app.py"
     echo ""
     read -p "Продолжить все равно? (y/n) " -n 1 -r
